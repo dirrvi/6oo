@@ -1,0 +1,185 @@
+// English Learning Platform — Single-file React app (App.jsx)
+// TailwindCSS-ready. Fixed Firebase Auth registration issue.
+
+import React, { useEffect, useState } from 'react'
+import { initializeApp } from 'firebase/app'
+import {
+  getAuth,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged,
+  sendPasswordResetEmail,
+} from 'firebase/auth'
+import {
+  getFirestore,
+  doc,
+  setDoc,
+  getDoc,
+  collection,
+  addDoc,
+  updateDoc,
+  query,
+  where,
+  getDocs,
+  onSnapshot,
+} from 'firebase/firestore'
+import { getStorage, ref as storageRef, uploadBytesResumable, getDownloadURL } from 'firebase/storage'
+
+// ---------------------------
+// Firebase Config
+// ---------------------------
+const firebaseConfig = {
+  apiKey: "REPLACE_API_KEY",
+  authDomain: "REPLACE_PROJECT.firebaseapp.com",
+  projectId: "REPLACE_PROJECT",
+  storageBucket: "REPLACE_PROJECT.appspot.com",
+  messagingSenderId: "REPLACE_SENDER_ID",
+  appId: "REPLACE_APP_ID",
+}
+
+const app = initializeApp(firebaseConfig)
+const auth = getAuth(app) // <-- ensure auth initialized AFTER app
+const db = getFirestore(app)
+const storage = getStorage(app)
+
+// ---------------------------
+// Utility functions
+// ---------------------------
+function uid() {
+  return Math.random().toString(36).slice(2, 9)
+}
+function generateCode() {
+  return Math.floor(100000 + Math.random() * 900000).toString()
+}
+
+// ---------------------------
+// Styles
+// ---------------------------
+const container = 'min-h-screen bg-white text-gray-800'
+const mainCard = 'max-w-6xl mx-auto p-6'
+const headerCls = 'flex items-center justify-between mb-6'
+const blueBadge = 'bg-sky-200 text-sky-900 px-2 py-1 rounded'
+
+// ---------------------------
+// App
+// ---------------------------
+export default function App() {
+  const [user, setUser] = useState(null)
+  const [profile, setProfile] = useState(null)
+  const [route, setRoute] = useState('dashboard')
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (u) => {
+      if (u) {
+        setUser(u)
+        const p = await getDoc(doc(db, 'users', u.uid))
+        setProfile(p.exists() ? p.data() : null)
+      } else {
+        setUser(null)
+        setProfile(null)
+      }
+    })
+    return unsub
+  }, [])
+
+  return (
+    <div className={container}>
+      <div className={mainCard}>
+        <header className={headerCls}>
+          <h1 className="text-2xl font-bold">Platform — <span className="text-sky-600">English</span></h1>
+          <div className="flex gap-4 items-center">
+            {user ? (
+              <>
+                <div className="text-sm">
+                  {profile?.role && <span className={blueBadge + ' mr-2'}>{profile.role}</span>}
+                  <strong>{user.email}</strong>
+                </div>
+                <button className="px-3 py-1 border rounded" onClick={() => signOut(auth)}>Sign out</button>
+              </>
+            ) : (
+              <AuthForms setRoute={setRoute} />
+            )}
+          </div>
+        </header>
+        <div className="grid grid-cols-4 gap-6">
+          <aside className="col-span-1 border-r pr-4">
+            <CourseSidebar setRoute={setRoute} profile={profile} />
+          </aside>
+          <main className="col-span-3">
+            {!user && <Welcome />}
+            {user && profile && <Dashboard route={route} profile={profile} user={user} setProfile={setProfile} />}
+            {user && !profile && <PendingProfile />}
+          </main>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------
+// Components
+// ---------------------------
+function Welcome() { return <div className="p-6 border rounded"><h2 className="text-xl font-semibold mb-2">Добро пожаловать</h2><p>Пожалуйста, зарегистрируйтесь или войдите, чтобы продолжить.</p></div> }
+function PendingProfile() { return <div className="p-6 border rounded"><h2 className="text-xl">Аккаунт создан — ожидает подтверждения</h2><p>Владелец должен выдать вам код доступа.</p></div> }
+
+function CourseSidebar({ setRoute, profile }) {
+  return (
+    <div>
+      <div className="mb-4 font-semibold">Курс: <span className="text-sky-600">Английский язык</span></div>
+      <button className="w-full mb-2 px-3 py-2 bg-sky-50 border rounded" onClick={() => setRoute('createLesson')}>Создать урок</button>
+      <button className="w-full mb-2 px-3 py-2 border rounded" onClick={() => setRoute('lessons')}>Все уроки</button>
+      <button className="w-full mb-2 px-3 py-2 border rounded" onClick={() => setRoute('students')}>Список учеников</button>
+      {profile?.role === 'Owner' && <button className="w-full mt-4 px-3 py-2 bg-sky-100 border rounded" onClick={() => setRoute('admin')}>Админ панель</button>}
+      {profile?.role === 'Teacher' && <div className="mt-4 text-sm text-gray-600">Как учитель, вы видите и редактируете уроки.</div>}
+    </div>
+  )
+}
+
+function Dashboard({ route, profile, user, setProfile }) {
+  if (route === 'createLesson') return <LessonCreator profile={profile} user={user} />
+  if (route === 'lessons') return <LessonsList profile={profile} />
+  if (route === 'students') return <StudentsList />
+  if (route === 'admin') return <AdminPanel setProfile={setProfile} />
+  return <div>Выберите действие слева.</div>
+}
+
+function AuthForms({ setRoute }) {
+  const [mode, setMode] = useState('login')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [message, setMessage] = useState('')
+
+  async function handleRegister(e) {
+    e.preventDefault()
+    try {
+      const userCred = await createUserWithEmailAndPassword(auth, email, password)
+      const verificationCode = generateCode()
+      await setDoc(doc(db, 'users', userCred.user.uid), { email, role: 'Pending', createdAt: new Date().toISOString() })
+      await addDoc(collection(db, 'requests'), { uid: userCred.user.uid, email, verificationCode, status: 'awaiting-owner', createdAt: Date.now() })
+      console.log('DEV: verification code for', email, verificationCode)
+      await setDoc(doc(db, 'codes', userCred.user.uid), { code: verificationCode })
+      setMessage('Аккаунт зарегистрирован. Проверьте почту или обратитесь к владельцу для кода. (DEV: смотрите консоль/Firestore docs/codes)')
+      setRoute('verifyCode')
+    } catch (err) { console.error(err); setMessage(err.message) }
+  }
+
+  async function handleLogin(e) {
+    e.preventDefault()
+    try { await signInWithEmailAndPassword(auth, email, password) } catch(err){console.error(err); setMessage(err.message)}
+  }
+
+  return (
+    <div className="flex gap-2">
+      <form onSubmit={mode==='login'?handleLogin:handleRegister} className="flex items-center gap-2">
+        <input required type="email" placeholder="Email" value={email} onChange={e=>setEmail(e.target.value)} className="px-2 py-1 border rounded" />
+        <input required type="password" placeholder="Пароль" value={password} onChange={e=>setPassword(e.target.value)} className="px-2 py-1 border rounded" />
+        <button type="submit" className="px-3 py-1 bg-sky-50 border rounded">{mode==='login'?'Войти':'Зарегистрироваться'}</button>
+      </form>
+      <div className="text-xs">
+        <button onClick={()=>setMode(mode==='login'?'register':'login')} className="underline">{mode==='login'?'Нет аккаунта? Регистрация':'Уже есть аккаунт? Вход'}</button>
+        <div className="text-red-600">{message}</div>
+      </div>
+    </div>
+  )
+}
